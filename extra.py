@@ -767,242 +767,583 @@
 
 
 
-import os
-import re
-import streamlit as st
-from pypdf import PdfReader
-from docx import Document
-from striprtf.striprtf import rtf_to_text
-from langchain_huggingface import HuggingFaceEmbeddings
-from sklearn.metrics.pairwise import cosine_similarity
-import concurrent.futures
-import time
-import logging
+# import os
+# import re
+# import streamlit as st
+# from pypdf import PdfReader
+# from docx import Document
+# from striprtf.striprtf import rtf_to_text
+# from langchain_huggingface import HuggingFaceEmbeddings
+# from sklearn.metrics.pairwise import cosine_similarity
+# import concurrent.futures
+# import time
+# import logging
 
-# Mute all warning logs coming from the transformers library
+# # Mute all warning logs coming from the transformers library
+# logging.getLogger("transformers").setLevel(logging.ERROR)
+
+
+# # ─────────────────────────────────────────────
+# # PAGE CONFIG
+# # ─────────────────────────────────────────────
+# st.set_page_config(page_title="Resume Matcher", page_icon="📄")
+# st.title("📄 Resume Matcher — 100% Local")
+
+
+# # ─────────────────────────────────────────────
+# # LOAD EMBEDDING MODEL (cached so it only loads once)
+# #
+# # Change model_name to any sentence-transformers model.
+# # Fast options:
+# #   - "all-MiniLM-L6-v2"        (80MB, very fast)
+# #   - "all-MiniLM-L12-v2"       (120MB, slightly better)
+# #   - "./saved_embedding_model"  (your local saved model)
+# # ─────────────────────────────────────────────
+# @st.cache_resource
+# def load_model():
+#     st.info("Loading embedding model (only once)...")
+#     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+# embedding_model = load_model()
+
+
+# # ─────────────────────────────────────────────
+# # STEP 1: EXTRACT TEXT FROM FILE
+# # ─────────────────────────────────────────────
+# def extract_text(file) -> str:
+#     ext = os.path.splitext(file.name)[1].lower()
+
+#     if ext == ".pdf":
+#         pdf = PdfReader(file)
+#         return "".join(page.extract_text() or "" for page in pdf.pages)
+
+#     if ext == ".docx":
+#         doc = Document(file)
+#         return "\n".join(p.text for p in doc.paragraphs)
+
+#     if ext == ".rtf":
+#         content = file.read().decode("utf-8", errors="ignore")
+#         return rtf_to_text(content)
+
+#     if ext == ".txt":
+#         return file.read().decode("utf-8", errors="ignore")
+
+#     return ""
+
+
+# # ─────────────────────────────────────────────
+# # STEP 2: READ ALL FILES IN PARALLEL
+# #
+# # Instead of reading one file at a time, we read
+# # all files at the same time using threads.
+# # 8 resumes at once → much faster total read time.
+# # ─────────────────────────────────────────────
+# def read_all_resumes(uploaded_files) -> list[dict]:
+#     def read_one(file):
+#         try:
+#             text = extract_text(file)
+#             if text.strip():
+#                 return {"filename": file.name, "text": text}
+#         except Exception as e:
+#             st.warning(f"⚠️ Could not read {file.name}: {e}")
+#         return None
+
+#     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+#         results = list(executor.map(read_one, uploaded_files))
+
+#     return [r for r in results if r is not None]
+
+
+# # ─────────────────────────────────────────────
+# # STEP 3: EMBED AND SCORE ALL RESUMES
+# #
+# # Key fix from your original code:
+# # - We embed ALL resumes in ONE batch call
+# #   instead of one by one → much faster
+# # - We only use first 1000 chars per resume
+# #   (enough context, keeps embedding fast)
+# # ─────────────────────────────────────────────
+# def score_resumes(job_description: str, resumes: list[dict]) -> list[dict]:
+
+#     # Embed job description (single query)
+#     job_embedding = embedding_model.embed_query(job_description)
+
+#     # Embed all resumes in ONE batch (fastest way)
+#     resume_texts = [r["text"][:1000] for r in resumes]
+#     resume_embeddings = embedding_model.embed_documents(resume_texts)
+
+#     # Score each resume against the job description
+#     for resume, embedding in zip(resumes, resume_embeddings):
+#         score = cosine_similarity([job_embedding], [embedding])[0][0]
+#         resume["score"] = float(score)
+
+#     # Sort highest score first
+#     return sorted(resumes, key=lambda x: x["score"], reverse=True)
+
+
+# # ─────────────────────────────────────────────
+# # STEP 4: EXTRACT KEY INFO FROM RESUME TEXT
+# #
+# # Simple rule-based parsing to pull out:
+# # - Candidate name (first non-empty line)
+# # - Email address
+# # - Phone number
+# # - Skills (looks for a "Skills" section)
+# # - Years of experience (looks for "X years" pattern)
+# #
+# # This replaces the AI analysis step completely.
+# # No API needed — just text parsing.
+# # ─────────────────────────────────────────────
+# def extract_info(text: str) -> dict:
+#     lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+#     # Name: assume first non-empty line is the candidate's name
+#     name = lines[0] if lines else "Not Found"
+
+#     # Email: find anything matching email pattern
+#     email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
+#     email = email_match.group() if email_match else "Not Found"
+
+#     # Phone: find 10+ digit numbers (handles spaces/dashes)
+#     phone_match = re.search(r"(\+?\d[\d\s\-]{9,15})", text)
+#     phone = phone_match.group().strip() if phone_match else "Not Found"
+
+#     # Years of experience: find "X years" or "X+ years" pattern
+#     exp_match = re.search(r"(\d+\+?\s+years?)", text, re.IGNORECASE)
+#     experience = exp_match.group() if exp_match else "Not Found"
+
+#     # Skills: find text after a "Skills" heading, grab next 2 lines
+#     skills = "Not Found"
+#     for i, line in enumerate(lines):
+#         if re.search(r"\bskills?\b", line, re.IGNORECASE):
+#             # Grab up to 2 lines after the "Skills" heading
+#             skill_lines = lines[i+1 : i+3]
+#             if skill_lines:
+#                 skills = " | ".join(skill_lines)
+#             break
+
+#     return {
+#         "name": name,
+#         "email": email,
+#         "phone": phone,
+#         "experience": experience,
+#         "skills": skills,
+#     }
+
+
+# # ─────────────────────────────────────────────
+# # UI
+# # ─────────────────────────────────────────────
+# job_description = st.text_area(" Enter Job Description", height=180)
+
+# uploaded_files = st.file_uploader(
+#     " Upload Resumes (Max 50)",
+#     accept_multiple_files=True,
+#     type=["pdf", "docx", "rtf", "txt"]
+# )
+
+# if uploaded_files:
+
+#     if len(uploaded_files) > 50:
+#         st.error(" Maximum 50 resumes allowed.")
+#         st.stop()
+
+#     if st.button(" Match Resumes", type="primary"):
+
+#         if not job_description.strip():
+#             st.error(" Please enter a job description.")
+#             st.stop()
+
+#         total_start = time.time()
+
+#         # --- Read files in parallel ---
+#         with st.spinner(f"Reading {len(uploaded_files)} resumes..."):
+#             t = time.time()
+#             resumes = read_all_resumes(uploaded_files)
+#             st.write(f" Read {len(resumes)} resumes in **{time.time() - t:.2f}s**")
+
+#         if not resumes:
+#             st.warning("No valid resume text found.")
+#             st.stop()
+
+#         # --- Score with embeddings ---
+#         with st.spinner("Scoring resumes with embedding model..."):
+#             t = time.time()
+#             scored = score_resumes(job_description, resumes)
+#             top_10 = scored[:10]
+#             st.write(f" Scored {len(resumes)} resumes in **{time.time() - t:.2f}s**")
+
+#         # --- Show results table ---
+#         st.subheader(" Top 10 Matching Resumes")
+
+#         for i, resume in enumerate(top_10, 1):
+#             info = extract_info(resume["text"])
+#             match_pct = resume["score"] * 100
+
+#             # Color the score: green > 60%, orange > 40%, red below
+#             if match_pct >= 60:
+#                 color = ""
+#             elif match_pct >= 40:
+#                 color = ""
+#             else:
+#                 color = ""
+
+#             with st.expander(
+#                 f"{i}. {info['name']} — {color} {match_pct:.1f}% match  | {resume['filename']}"
+#             ):
+#                 col1, col2 = st.columns(2)
+
+#                 with col1:
+#                     st.markdown(f"** Email:** {info['email']}")
+#                     st.markdown(f"** Phone:** {info['phone']}")
+#                     st.markdown(f"**Experience:** {info['experience']}")
+
+#                 with col2:
+#                     st.markdown(f"** Skills:** {info['skills']}")
+#                     st.markdown(f"** Match Score:** {match_pct:.2f}%")
+
+#                 st.markdown("** Resume Preview:**")
+#                 st.text(resume["text"][:500] + "...")
+
+#         st.success(f" Total time: **{time.time() - total_start:.1f} seconds**")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# ==================================================================================================
+
+# import logging
+# import os
+# import time
+# from docx import Document
+# from langchain_huggingface import HuggingFaceEmbeddings
+# from pypdf import PdfReader
+# from sklearn.metrics.pairwise import cosine_similarity
+# from striprtf.striprtf import rtf_to_text
+# import streamlit as st
+
+# logging.getLogger("transformers").setLevel(logging.ERROR)
+
+# # It loads the embedidng mdoel into memory exactly once (prevent from being reload)
+# @st.cache_resource
+# def load_embedding_model():
+#     return HuggingFaceEmbeddings(model_name="./saved_embedding_model")
+
+# # It stores the results of the embedding calculations
+# @st.cache_data
+# def get_resume_embeddings(texts):
+#     return embedding_model.embed_documents(texts)
+
+# # Calls function and stores model object
+# embedding_model = load_embedding_model()
+
+# st.title("Resume Matcher Assistant")
+
+# # Create large textbox
+# job_description = st.text_area("Enter Job Description", height=200)
+
+# # Create upload
+# uploaded_files = st.file_uploader(
+#     "Upload Resumes (Max 50)", accept_multiple_files=True
+# )
+
+# # Text extraction function
+# def extract_text(file):
+#     # Get extension
+#     ext = os.path.splitext(file.name)[1].lower()
+#     text = ""
+
+#     if ext == ".pdf":
+#         pdf = PdfReader(file)
+#         text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+#     elif ext == ".docx":
+#         doc = Document(file)
+#         text = "\n".join(p.text for p in doc.paragraphs)
+
+#     elif ext == ".rtf":
+#         content = file.read().decode("utf-8", errors="ignore")
+#         text = rtf_to_text(content)
+
+#     elif ext == ".txt":
+#         text = file.read().decode("utf-8", errors="ignore")
+
+#     return text.strip()
+
+
+# def is_valid_resume(text):
+#     words = text.split()
+#     # Reject tiny documents
+#     if len(words) < 30:
+#         return False
+
+#     return True
+
+
+# def get_score(item):
+#     return item["score"]
+
+
+# if uploaded_files:
+#     if len(uploaded_files) > 50:
+#         st.error("Maximum 50 resumes allowed.")
+#     # Runs matching only when button clicked.
+#     elif st.button("Match Resumes"):
+#         # if checkbox empty
+#         if not job_description.strip():
+#             st.error("Please enter a job description.")
+#             # stops execution
+#             st.stop()
+#         # valid resumes
+#         resumes = []
+
+#         with st.spinner("Reading resumes..."):
+#             for file in uploaded_files:
+#                 try:
+#                     text = extract_text(file)
+#                     if is_valid_resume(text):
+#                         resumes.append({"filename": file.name, "text": text})
+
+#                 except Exception as e:
+#                     st.error(f"Error in {file.name}: {e}")
+
+#         if not resumes:
+#             st.warning("No valid resume text found.")
+#             st.stop()
+
+#         st.success(f"{len(resumes)} resumes processed.")
+
+#         with st.spinner("Calculating scores..."):
+#             # Start timer.
+#             start = time.time()
+#             job_embedding = embedding_model.embed_query(job_description)
+#             st.write(f"Job embedding time: {time.time() - start:.2f} sec")
+
+#             # Only first 3000 characters used.
+#             resume_texts = [resume["text"] for resume in resumes]
+
+#             start = time.time()
+#             # creates vectors of all resumes
+#             resume_embeddings = get_resume_embeddings(resume_texts)
+#             st.write(f"Resume embedding time: {time.time() - start:.2f} sec")
+
+#             results = []
+#             # pair resumes and embeddings
+#             for resume, resume_embedding in zip(resumes, resume_embeddings):
+#                 # computes similarity
+#                 score = cosine_similarity([job_embedding], [resume_embedding])[0][0]
+
+#                 results.append(
+#                     {
+#                         "filename": resume["filename"],
+#                         "text": resume["text"],
+#                         "score": score,
+#                     }
+#                 )
+
+#         # Sort results
+#         results.sort(key=get_score, reverse=True)
+
+#         # Top 10
+#         top_resumes = results[:10]
+
+#         st.subheader("Top 10 Matching Resumes")
+
+#         for index, resume in enumerate(top_resumes, start=1):
+#             st.write(
+#                 f"{index}. {resume['filename']} ",
+#                 # f"({resume['score'] * 100:.2f}% Match)",
+#             )
+
+# ==================================================================================================
+# ==================================================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+import logging
+import os
+import time
+from docx import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from pypdf import PdfReader
+from sklearn.metrics.pairwise import cosine_similarity
+from striprtf.striprtf import rtf_to_text
+import streamlit as st
+
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
+# Initialize a unique key tracking counter in session state if it doesn't exist
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
-# ─────────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────────
-st.set_page_config(page_title="Resume Matcher", page_icon="📄")
-st.title("📄 Resume Matcher — 100% Local")
-
-
-# ─────────────────────────────────────────────
-# LOAD EMBEDDING MODEL (cached so it only loads once)
-#
-# Change model_name to any sentence-transformers model.
-# Fast options:
-#   - "all-MiniLM-L6-v2"        (80MB, very fast)
-#   - "all-MiniLM-L12-v2"       (120MB, slightly better)
-#   - "./saved_embedding_model"  (your local saved model)
-# ─────────────────────────────────────────────
+# It loads the embedidng mdoel into memory exactly once (prevent from being reload)
 @st.cache_resource
-def load_model():
-    st.info("Loading embedding model (only once)...")
-    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+def load_embedding_model():
+    return HuggingFaceEmbeddings(model_name="./saved_embedding_model")
 
-embedding_model = load_model()
+# It stores the results of the embedding calculations
+@st.cache_data
+def get_resume_embeddings(texts):
+    return embedding_model.embed_documents(texts)
 
+# Calls function and stores model object
+embedding_model = load_embedding_model()
 
-# ─────────────────────────────────────────────
-# STEP 1: EXTRACT TEXT FROM FILE
-# ─────────────────────────────────────────────
-def extract_text(file) -> str:
+st.title("Resume Matcher Assistant")
+
+# Create large textbox
+job_description = st.text_area("Enter Job Description", height=200)
+
+# Create upload - bound to a dynamic key from session state
+uploaded_files = st.file_uploader(
+    "Upload Resumes (Max 50)", 
+    accept_multiple_files=True,
+    key=f"resumes_{st.session_state.uploader_key}"
+)
+
+# Add a Clear button only if files are currently uploaded
+if uploaded_files:
+    if st.button("❌ Clear All Resumes"):
+        st.session_state.uploader_key += 1
+        st.rerun()
+
+# Text extraction function
+def extract_text(file):
+    # Get extension
     ext = os.path.splitext(file.name)[1].lower()
+    text = ""
 
     if ext == ".pdf":
         pdf = PdfReader(file)
-        return "".join(page.extract_text() or "" for page in pdf.pages)
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-    if ext == ".docx":
+    elif ext == ".docx":
         doc = Document(file)
-        return "\n".join(p.text for p in doc.paragraphs)
+        text = "\n".join(p.text for p in doc.paragraphs)
 
-    if ext == ".rtf":
+    elif ext == ".rtf":
         content = file.read().decode("utf-8", errors="ignore")
-        return rtf_to_text(content)
+        text = rtf_to_text(content)
 
-    if ext == ".txt":
-        return file.read().decode("utf-8", errors="ignore")
+    elif ext == ".txt":
+        text = file.read().decode("utf-8", errors="ignore")
 
-    return ""
-
-
-# ─────────────────────────────────────────────
-# STEP 2: READ ALL FILES IN PARALLEL
-#
-# Instead of reading one file at a time, we read
-# all files at the same time using threads.
-# 8 resumes at once → much faster total read time.
-# ─────────────────────────────────────────────
-def read_all_resumes(uploaded_files) -> list[dict]:
-    def read_one(file):
-        try:
-            text = extract_text(file)
-            if text.strip():
-                return {"filename": file.name, "text": text}
-        except Exception as e:
-            st.warning(f"⚠️ Could not read {file.name}: {e}")
-        return None
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(read_one, uploaded_files))
-
-    return [r for r in results if r is not None]
+    return text.strip()
 
 
-# ─────────────────────────────────────────────
-# STEP 3: EMBED AND SCORE ALL RESUMES
-#
-# Key fix from your original code:
-# - We embed ALL resumes in ONE batch call
-#   instead of one by one → much faster
-# - We only use first 1000 chars per resume
-#   (enough context, keeps embedding fast)
-# ─────────────────────────────────────────────
-def score_resumes(job_description: str, resumes: list[dict]) -> list[dict]:
+def is_valid_resume(text):
+    words = text.split()
+    # Reject tiny documents
+    if len(words) < 30:
+        return False
 
-    # Embed job description (single query)
-    job_embedding = embedding_model.embed_query(job_description)
-
-    # Embed all resumes in ONE batch (fastest way)
-    resume_texts = [r["text"][:1000] for r in resumes]
-    resume_embeddings = embedding_model.embed_documents(resume_texts)
-
-    # Score each resume against the job description
-    for resume, embedding in zip(resumes, resume_embeddings):
-        score = cosine_similarity([job_embedding], [embedding])[0][0]
-        resume["score"] = float(score)
-
-    # Sort highest score first
-    return sorted(resumes, key=lambda x: x["score"], reverse=True)
+    return True
 
 
-# ─────────────────────────────────────────────
-# STEP 4: EXTRACT KEY INFO FROM RESUME TEXT
-#
-# Simple rule-based parsing to pull out:
-# - Candidate name (first non-empty line)
-# - Email address
-# - Phone number
-# - Skills (looks for a "Skills" section)
-# - Years of experience (looks for "X years" pattern)
-#
-# This replaces the AI analysis step completely.
-# No API needed — just text parsing.
-# ─────────────────────────────────────────────
-def extract_info(text: str) -> dict:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+def get_score(item):
+    return item["score"]
 
-    # Name: assume first non-empty line is the candidate's name
-    name = lines[0] if lines else "Not Found"
-
-    # Email: find anything matching email pattern
-    email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
-    email = email_match.group() if email_match else "Not Found"
-
-    # Phone: find 10+ digit numbers (handles spaces/dashes)
-    phone_match = re.search(r"(\+?\d[\d\s\-]{9,15})", text)
-    phone = phone_match.group().strip() if phone_match else "Not Found"
-
-    # Years of experience: find "X years" or "X+ years" pattern
-    exp_match = re.search(r"(\d+\+?\s+years?)", text, re.IGNORECASE)
-    experience = exp_match.group() if exp_match else "Not Found"
-
-    # Skills: find text after a "Skills" heading, grab next 2 lines
-    skills = "Not Found"
-    for i, line in enumerate(lines):
-        if re.search(r"\bskills?\b", line, re.IGNORECASE):
-            # Grab up to 2 lines after the "Skills" heading
-            skill_lines = lines[i+1 : i+3]
-            if skill_lines:
-                skills = " | ".join(skill_lines)
-            break
-
-    return {
-        "name": name,
-        "email": email,
-        "phone": phone,
-        "experience": experience,
-        "skills": skills,
-    }
-
-
-# ─────────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────────
-job_description = st.text_area(" Enter Job Description", height=180)
-
-uploaded_files = st.file_uploader(
-    " Upload Resumes (Max 50)",
-    accept_multiple_files=True,
-    type=["pdf", "docx", "rtf", "txt"]
-)
 
 if uploaded_files:
-
     if len(uploaded_files) > 50:
-        st.error(" Maximum 50 resumes allowed.")
-        st.stop()
-
-    if st.button(" Match Resumes", type="primary"):
-
+        st.error("Maximum 50 resumes allowed.")
+    # Runs matching only when button clicked.
+    elif st.button("Match Resumes"):
+        # if checkbox empty
         if not job_description.strip():
-            st.error(" Please enter a job description.")
+            st.error("Please enter a job description.")
+            # stops execution
             st.stop()
+        # valid resumes
+        resumes = []
 
-        total_start = time.time()
+        with st.spinner("Reading resumes..."):
+            for file in uploaded_files:
+                try:
+                    text = extract_text(file)
+                    if is_valid_resume(text):
+                        resumes.append({"filename": file.name, "text": text})
 
-        # --- Read files in parallel ---
-        with st.spinner(f"Reading {len(uploaded_files)} resumes..."):
-            t = time.time()
-            resumes = read_all_resumes(uploaded_files)
-            st.write(f" Read {len(resumes)} resumes in **{time.time() - t:.2f}s**")
+                except Exception as e:
+                    st.error(f"Error in {file.name}: {e}")
 
         if not resumes:
             st.warning("No valid resume text found.")
             st.stop()
 
-        # --- Score with embeddings ---
-        with st.spinner("Scoring resumes with embedding model..."):
-            t = time.time()
-            scored = score_resumes(job_description, resumes)
-            top_10 = scored[:10]
-            st.write(f" Scored {len(resumes)} resumes in **{time.time() - t:.2f}s**")
+        st.success(f"{len(resumes)} resumes processed.")
 
-        # --- Show results table ---
-        st.subheader(" Top 10 Matching Resumes")
+        with st.spinner("Calculating scores..."):
+            # Start timer.
+            start = time.time()
+            job_embedding = embedding_model.embed_query(job_description)
+            st.write(f"Job embedding time: {time.time() - start:.2f} sec")
 
-        for i, resume in enumerate(top_10, 1):
-            info = extract_info(resume["text"])
-            match_pct = resume["score"] * 100
+            # Only first 3000 characters used.
+            resume_texts = [resume["text"] for resume in resumes]
 
-            # Color the score: green > 60%, orange > 40%, red below
-            if match_pct >= 60:
-                color = ""
-            elif match_pct >= 40:
-                color = ""
-            else:
-                color = ""
+            start = time.time()
+            # creates vectors of all resumes
+            resume_embeddings = get_resume_embeddings(resume_texts)
+            st.write(f"Resume embedding time: {time.time() - start:.2f} sec")
 
-            with st.expander(
-                f"{i}. {info['name']} — {color} {match_pct:.1f}% match  | {resume['filename']}"
-            ):
-                col1, col2 = st.columns(2)
+            results = []
+            # pair resumes and embeddings
+            for resume, resume_embedding in zip(resumes, resume_embeddings):
+                # computes similarity
+                score = cosine_similarity([job_embedding], [resume_embedding])[0][0]
 
-                with col1:
-                    st.markdown(f"** Email:** {info['email']}")
-                    st.markdown(f"** Phone:** {info['phone']}")
-                    st.markdown(f"**Experience:** {info['experience']}")
+                results.append(
+                    {
+                        "filename": resume["filename"],
+                        "text": resume["text"],
+                        "score": score,
+                    }
+                )
 
-                with col2:
-                    st.markdown(f"** Skills:** {info['skills']}")
-                    st.markdown(f"** Match Score:** {match_pct:.2f}%")
+        # Sort results
+        results.sort(key=get_score, reverse=True)
 
-                st.markdown("** Resume Preview:**")
-                st.text(resume["text"][:500] + "...")
+        # Top 10
+        top_resumes = results[:10]
 
-        st.success(f" Total time: **{time.time() - total_start:.1f} seconds**")
+        st.subheader("Top 10 Matching Resumes")
+
+        for index, resume in enumerate(top_resumes, start=1):
+            st.write(
+                f"{index}. {resume['filename']} ",
+                f"({resume['score'] * 100:.2f}% Match)",
+            )

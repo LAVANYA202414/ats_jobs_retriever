@@ -13,12 +13,15 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 # It loads the embedidng mdoel into memory exactly once (prevent from being reload)
 @st.cache_resource
 def load_embedding_model():
+    # load locally saved hugging face text embedding model
     return HuggingFaceEmbeddings(model_name="./saved_embedding_model")
+
 
 # It stores the results of the embedding calculations
 @st.cache_data
 def get_resume_embeddings(texts):
     return embedding_model.embed_documents(texts)
+
 
 # Calls function and stores model object
 embedding_model = load_embedding_model()
@@ -138,5 +141,5 @@ if uploaded_files:
         for index, resume in enumerate(top_resumes, start=1):
             st.write(
                 f"{index}. {resume['filename']} ",
-                # f"({resume['score'] * 100:.2f}% Match)",
+                f"({resume['score'] * 100:.2f}% Match)",
             )
