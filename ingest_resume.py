@@ -13,15 +13,12 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 # It loads the embedidng mdoel into memory exactly once (prevent from being reload)
 @st.cache_resource
 def load_embedding_model():
-    # load locally saved hugging face text embedding model
     return HuggingFaceEmbeddings(model_name="./saved_embedding_model")
-
 
 # It stores the results of the embedding calculations
 @st.cache_data
 def get_resume_embeddings(texts):
     return embedding_model.embed_documents(texts)
-
 
 # Calls function and stores model object
 embedding_model = load_embedding_model()
@@ -31,19 +28,20 @@ st.title("Resume Matcher Assistant")
 # Create large textbox
 job_description = st.text_area("Enter Job Description", height=200)
 
-# Create upload
+# Create upload files
 uploaded_files = st.file_uploader(
     "Upload Resumes (Max 50)", accept_multiple_files=True
 )
 
 # Text extraction function
-def extract_text(file):
+def extract_resume_text(file):
     # Get extension
     ext = os.path.splitext(file.name)[1].lower()
     text = ""
 
     if ext == ".pdf":
         pdf = PdfReader(file)
+        # page.extract_text() -> belongs to pypdf library
         text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
     elif ext == ".docx":
@@ -89,7 +87,7 @@ if uploaded_files:
         with st.spinner("Reading resumes..."):
             for file in uploaded_files:
                 try:
-                    text = extract_text(file)
+                    text = extract_resume_text(file)
                     if is_valid_resume(text):
                         resumes.append({"filename": file.name, "text": text})
 
@@ -141,5 +139,5 @@ if uploaded_files:
         for index, resume in enumerate(top_resumes, start=1):
             st.write(
                 f"{index}. {resume['filename']} ",
-                f"({resume['score'] * 100:.2f}% Match)",
+                # f"({resume['score'] * 100:.2f}% Match)",
             )
